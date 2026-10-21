@@ -1,24 +1,19 @@
 # Changelog
 
-## v5.3.3 — Crash resistance on model restore
-- Default model changed back to **Llama 3.2 1B** (more stable on iPhone than 1.5B).
-- Auto-restore is now conservative: only ≤1B models auto-load after a page refresh. 1.5B / 3B require a manual Load tap (prevents crash loops).
-- Longer GPU memory release pause before loading a new model.
-- On OOM / memory kill, the selector automatically switches to SmolLM2 360M and clears the last heavy model preference.
-- Clearer progress warnings when a heavier model is chosen.
+## v5.3.4 — Stop auto-load crash (jetsam kill)
+
+- **Completely disabled automatic model restore on page load.**
+  This was the main cause of the tab dying with no error when reopening the app.
+  Safari was being killed by iOS memory pressure (jetsam) while the model was being
+  restored in the background. You must now tap **Load** yourself after the page settles.
+- Longer GPU memory release pause after unloading a previous engine.
+- History restore and embedder start are delayed until the LLM is fully ready.
+- Clearer error message when an OOM / device-lost style failure is detected.
+- Default remains Qwen2.5 1.5B (the model that was working for you).
 
 ## v5.3.2 — More free information sources
-- **Wikipedia improved**: direct summary + OpenSearch fallback when the exact title fails.
-- **Research (free path)** now also pulls:
-  - Free Dictionary API for short phrases
-  - Free RSS headlines via feed2json (BBC / NPR / Guardian)
-  - Hacker News top stories (tech / current discussion)
-- News still prefers Serper/Tavily when keys exist; free RSS remains available without keys.
-- Default model: Qwen2.5 1.5B. (reverted in 5.3.3 for stability)
+- Wikipedia improved, free dictionary, RSS, Hacker News paths.
+- Default was Qwen2.5 1.5B.
 
-## v5.3.1 — News keys-first
-- When Serper or Tavily keys are present, news uses those APIs first.
-- Free RSS converters kept as fallback.
-
-## v5.3 / earlier
+## v5.3.1 / earlier
 - Learning ledger, training pipeline, model selector, etc.
