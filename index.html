@@ -378,9 +378,9 @@
     <select id="modelSelect">
       <option value="SmolLM2-360M-Instruct-q4f16_1-MLC">SmolLM2 360M (safest / fastest)</option>
       <option value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC">Qwen2.5 0.5B (light)</option>
-      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC" selected>Llama 3.2 1B (balanced — default)</option>
+      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Llama 3.2 1B (balanced)</option>
       <option value="Llama-3.2-1B-Instruct-q4f32_1-MLC">Llama 3.2 1B q4f32 (no f16 needed)</option>
-      <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Qwen2.5 1.5B</option>
+      <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC" selected>Qwen2.5 1.5B (default)</option>
       <option value="Llama-3.2-3B-Instruct-q4f16_1-MLC">Llama 3.2 3B (heavy — may crash on iPhone)</option>
     </select>
     <button id="loadBtn">Load</button>
@@ -2688,18 +2688,43 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
       }
     }
 
-    // Wikipedia summary (CORS-friendly)
+    // Wikipedia summary (CORS-friendly) + search fallback
     async function fetchWikipedia(topic) {
-      const title = encodeURIComponent(topic.trim());
-      const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${title}`;
-      const res = await fetchWithTimeout(url);
-      if (!res.ok) throw new Error("Wikipedia page not found");
-      const data = await res.json();
-      return {
-        title: data.title || topic,
-        extract: data.extract || "",
-        url: data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${title}`
-      };
+      const raw = topic.trim();
+      async function summaryFor(title) {
+        const enc = encodeURIComponent(title);
+        const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${enc}`;
+        const res = await fetchWithTimeout(url, {}, 10000);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data.type === "disambiguation") {
+          return {
+            title: data.title || title,
+            extract: (data.extract || "Disambiguation page.") + " Try a more specific name.",
+            url: data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${enc}`
+          };
+        }
+        if (!data.extract) return null;
+        return {
+          title: data.title || title,
+          extract: data.extract,
+          url: data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${enc}`
+        };
+      }
+      // 1) Direct title
+      let hit = await summaryFor(raw);
+      if (hit) return hit;
+      // 2) OpenSearch for best match
+      const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(raw)}&limit=5&namespace=0&format=json&origin=*`;
+      const sres = await fetchWithTimeout(searchUrl, {}, 10000);
+      if (!sres.ok) throw new Error("Wikipedia search failed");
+      const sdata = await sres.json();
+      const titles = (sdata && sdata[1]) || [];
+      for (const t of titles) {
+        hit = await summaryFor(t);
+        if (hit) return hit;
+      }
+      throw new Error("Wikipedia page not found");
     }
 
     // DuckDuckGo Instant Answer (entity-style summary, free, no key)
@@ -2728,14 +2753,72 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
       };
     }
 
-    // News: resilient RSS reader with multiple public gateways and partial-success handling.
-    // Public RSS feeds commonly block browser cross-origin requests; try several gateways.
+    // Hacker News top stories (free, no key — good for tech/current discussion)
+    async function fetchHackerNewsTop(limit = 8) {
+      const idsRes = await fetchWithTimeout("https://hacker-news.firebaseio.com/v0/topstories.json", {}, 10000);
+      if (!idsRes.ok) throw new Error("HN topstories failed");
+      const ids = (await idsRes.json()).slice(0, limit);
+      const stories = [];
+      await Promise.all(ids.map(async id => {
+        try {
+          const r = await fetchWithTimeout(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {}, 8000);
+          if (!r.ok) return;
+          const item = await r.json();
+          if (item && item.title) {
+            stories.push({
+              title: item.title,
+              url: item.url || `https://news.ycombinator.com/item?id=${item.id}`,
+              score: item.score || 0,
+              by: item.by || ""
+            });
+          }
+        } catch (_) {}
+      }));
+      stories.sort((a, b) => (b.score || 0) - (a.score || 0));
+      return stories;
+    }
+
+    // Free RSS headlines via feed2json only (no key)
+    async function fetchFreeRssHeadlines() {
+      const feeds = [
+        { name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+        { name: "NPR", url: "https://feeds.npr.org/1001/rss.xml" },
+        { name: "The Guardian", url: "https://www.theguardian.com/world/rss" }
+      ];
+      const items = [];
+      await Promise.all(feeds.map(async feed => {
+        try {
+          const url = `https://feed2json.org/convert?url=${encodeURIComponent(feed.url)}`;
+          const res = await fetchWithTimeout(url, { headers: { "Accept": "application/json" } }, 12000);
+          if (!res.ok) return;
+          const data = await res.json();
+          for (const it of (data.items || []).slice(0, 5)) {
+            if (!it.title) continue;
+            items.push({
+              source: feed.name,
+              title: (it.title || "").replace(/\s+/g, " ").trim(),
+              description: ((it.summary || it.content_text || "") + "").replace(/\s+/g, " ").trim().slice(0, 200),
+              link: it.url || it.link || "",
+              pubDate: it.date_published || ""
+            });
+          }
+        } catch (_) {}
+      }));
+      return items;
+    }
+
+    // News: resilient multi-path fetcher (v5.3.1)
+    // Strategy:
+    //  1) If Serper/Tavily keys exist → use them first (most reliable on iPhone)
+    //  2) Otherwise try free RSS converters (feed2json, allorigins, etc.)
+    //  3) Cache last good result for 6 hours as soft fallback
     async function fetchNews() {
       const feeds = [
         { name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
         { name: "The Guardian", url: "https://www.theguardian.com/world/rss" },
         { name: "NPR", url: "https://feeds.npr.org/1001/rss.xml" },
-        { name: "Google News", url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en" }
+        { name: "Google News", url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en" },
+        { name: "Reuters", url: "https://www.reutersagency.com/feed/?taxonomy=best-topics&post_type=best" }
       ];
       const allItems = [];
       const errors = [];
@@ -2762,12 +2845,77 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
           };
         }).filter(item => item.title);
       }
+
+      // --- Path A: search APIs (best when keys exist) ---
+      async function trySearchApiNews() {
+        const queries = [
+          "top world news headlines today",
+          "breaking world news today"
+        ];
+        for (const q of queries) {
+          if (typeof tavilyKey !== "undefined" && tavilyKey) {
+            try {
+              const tr = await fetchTavily(q);
+              if (tr?.text && tr.text.length > 80) {
+                return [{
+                  source: "Tavily live search",
+                  title: "Top headlines (live search)",
+                  description: tr.text.slice(0, 1800),
+                  link: "",
+                  pubDate: new Date().toISOString()
+                }];
+              }
+            } catch (e) { errors.push("Tavily news: " + (e.message || e)); }
+          }
+          if (typeof serperKey !== "undefined" && serperKey) {
+            try {
+              const sr = await fetchSerper(q);
+              if (sr?.text && sr.text.length > 80) {
+                return [{
+                  source: "Serper live search",
+                  title: "Top headlines (live search)",
+                  description: sr.text.slice(0, 1800),
+                  link: "",
+                  pubDate: new Date().toISOString()
+                }];
+              }
+            } catch (e) { errors.push("Serper news: " + (e.message || e)); }
+          }
+        }
+        return null;
+      }
+
+      // --- Path B: free RSS converters ---
+      async function tryFeed2Json(feed) {
+        const url = `https://feed2json.org/convert?url=${encodeURIComponent(feed.url)}`;
+        const res = await fetchWithTimeout(url, { headers: { "Accept": "application/json" } }, 14000);
+        if (!res.ok) throw new Error(`feed2json HTTP ${res.status}`);
+        const data = await res.json();
+        const items = data.items || data.entries || [];
+        if (!Array.isArray(items) || !items.length) throw new Error("feed2json empty");
+        return items.slice(0, 6).map(item => ({
+          source: feed.name,
+          title: cleanText(item.title),
+          description: cleanText(item.summary || item.content_text || item.content_html || item.description || "").slice(0, 240),
+          link: (item.url || item.link || item.id || "").trim(),
+          pubDate: item.date_published || item.date_modified || item.pubDate || ""
+        })).filter(item => item.title);
+      }
+      async function tryAllOriginsGet(feed) {
+        const url = `https://api.allorigins.win/get?url=${encodeURIComponent(feed.url)}`;
+        const res = await fetchWithTimeout(url, { headers: { "Accept": "application/json" } }, 14000);
+        if (!res.ok) throw new Error(`allorigins/get HTTP ${res.status}`);
+        const data = await res.json();
+        const body = data.contents || data.content || "";
+        if (!body || !/<(?:rss|feed|rdf:RDF)\b/i.test(body)) throw new Error("allorigins no RSS");
+        return parseRss(body, feed.name);
+      }
       async function tryJsonGateway(feed) {
         const url = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feed.url)}`;
         const res = await fetchWithTimeout(url, { headers: { "Accept": "application/json" } }, 10000);
         if (!res.ok) throw new Error(`rss2json HTTP ${res.status}`);
         const data = await res.json();
-        if (data.status !== "ok" || !Array.isArray(data.items)) throw new Error(data.message || "rss2json returned no items");
+        if (data.status !== "ok" || !Array.isArray(data.items)) throw new Error(data.message || "rss2json empty");
         return data.items.slice(0, 6).map(item => ({
           source: feed.name,
           title: cleanText(item.title),
@@ -2784,11 +2932,27 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
         const res = await fetchWithTimeout(proxyUrl, { headers: { "Accept": "application/xml,text/xml,text/plain,*/*" } }, 10000);
         if (!res.ok) throw new Error(`${gateway} HTTP ${res.status}`);
         const body = await res.text();
-        if (!body || !/<(?:rss|feed|rdf:RDF)\b/i.test(body)) throw new Error(`${gateway} returned no RSS`);
+        if (!body || !/<(?:rss|feed|rdf:RDF)\b/i.test(body)) throw new Error(`${gateway} no RSS`);
         return parseRss(body, feed.name);
       }
+
+      // Prefer search APIs when keys are present (works far more reliably on iPhone Safari)
+      const hasSearchKey = !!( (typeof serperKey !== "undefined" && serperKey) || (typeof tavilyKey !== "undefined" && tavilyKey) );
+      if (hasSearchKey) {
+        try {
+          const apiItems = await trySearchApiNews();
+          if (apiItems && apiItems.length) {
+            try { localStorage.setItem("crazyBobNewsCache", JSON.stringify({ savedAt: Date.now(), items: apiItems })); } catch (_) {}
+            return apiItems;
+          }
+        } catch (e) { errors.push("search-api path: " + (e.message || e)); }
+      }
+
+      // RSS path (free, no key)
       await Promise.all(feeds.map(async feed => {
         const attempts = [
+          () => tryFeed2Json(feed),
+          () => tryAllOriginsGet(feed),
           () => tryJsonGateway(feed),
           () => tryRawGateway(feed, "allorigins"),
           () => tryRawGateway(feed, "corsproxy"),
@@ -2814,15 +2978,20 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
         unique.push(item);
       }
       if (!unique.length) {
-        // A short-lived cache lets Bob show recently fetched headlines during a temporary outage,
-        // but it is explicitly labelled as cached rather than live.
+        // Final attempt: search APIs again even if we already tried (in case first path was skipped)
+        if (hasSearchKey) {
+          try {
+            const apiItems = await trySearchApiNews();
+            if (apiItems && apiItems.length) return apiItems;
+          } catch (_) {}
+        }
         try {
           const cached = JSON.parse(localStorage.getItem("crazyBobNewsCache") || "null");
           if (cached?.items?.length && Date.now() - cached.savedAt < 6 * 60 * 60 * 1000) {
             return cached.items.map(item => ({ ...item, source: `${item.source} (cached)` }));
           }
         } catch (_) {}
-        throw new Error("All news gateways failed. Check your connection or try again later. " + errors.join("; "));
+        throw new Error("All news sources failed. " + (errors.slice(0, 6).join("; ") || "Check connection."));
       }
       const result = unique.slice(0, 18);
       try { localStorage.setItem("crazyBobNewsCache", JSON.stringify({ savedAt: Date.now(), items: result })); } catch (_) {}
@@ -2945,7 +3114,7 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
         } catch (e) { errors.push("Serper: " + e.message); }
       }
 
-      // Always try Wikipedia
+      // Always try Wikipedia (improved search fallback)
       try {
         const wiki = await fetchWikipedia(topic);
         if (wiki.extract) {
@@ -2954,13 +3123,56 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
       } catch (e) { errors.push("Wikipedia: " + e.message); }
 
       // DuckDuckGo instant answer as extra free signal
-      if (parts.length < 2) {
+      try {
+        const ddg = await fetchDuckDuckGo(topic);
+        if (ddg.abstract) {
+          parts.push(`=== DuckDuckGo (${ddg.source}) ===\n${ddg.heading}\n${ddg.abstract}\n${ddg.url}`);
+        }
+      } catch (e) { errors.push("DuckDuckGo: " + e.message); }
+
+      // Free dictionary when the topic looks like a single word / short phrase
+      if (topic.trim().split(/\s+/).length <= 3) {
         try {
-          const ddg = await fetchDuckDuckGo(topic);
-          if (ddg.abstract) {
-            parts.push(`=== DuckDuckGo (${ddg.source}) ===\n${ddg.heading}\n${ddg.abstract}\n${ddg.url}`);
+          const durl = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(topic.trim())}`;
+          const dres = await fetchWithTimeout(durl, {}, 8000);
+          if (dres.ok) {
+            const djson = await dres.json();
+            const entry = Array.isArray(djson) ? djson[0] : null;
+            if (entry) {
+              const meanings = (entry.meanings || []).slice(0, 2).map(m => {
+                const defs = (m.definitions || []).slice(0, 2).map(d => d.definition).filter(Boolean);
+                return `${m.partOfSpeech || "sense"}: ${defs.join("; ")}`;
+              }).filter(Boolean);
+              if (meanings.length) {
+                parts.push(`=== Free Dictionary ===\nWord: ${entry.word}\n${meanings.join("\n")}`);
+              }
+            }
           }
-        } catch (e) { errors.push("DuckDuckGo: " + e.message); }
+        } catch (e) { errors.push("Dictionary: " + (e.message || e)); }
+      }
+
+      // If topic looks news/current, pull free RSS headlines
+      if (/news|headline|today|latest|breaking|current events|what happened/i.test(topic) || parts.length < 2) {
+        try {
+          const rss = await fetchFreeRssHeadlines();
+          if (rss.length) {
+            const block = rss.slice(0, 10).map((it, i) =>
+              `${i + 1}. [${it.source}] ${it.title}${it.description ? " — " + it.description : ""}`
+            ).join("\n");
+            parts.push(`=== Free news RSS ===\n${block}`);
+          }
+        } catch (e) { errors.push("Free RSS: " + (e.message || e)); }
+      }
+
+      // Tech / startup angle → Hacker News (free)
+      if (/tech|startup|software|ai|programming|hacker|silicon|app|iphone|google|apple|microsoft/i.test(topic) || parts.length < 2) {
+        try {
+          const hn = await fetchHackerNewsTop(6);
+          if (hn.length) {
+            const block = hn.map((s, i) => `${i + 1}. ${s.title} (${s.score})\n   ${s.url}`).join("\n");
+            parts.push(`=== Hacker News (top) ===\n${block}`);
+          }
+        } catch (e) { errors.push("HN: " + (e.message || e)); }
       }
 
       if (parts.length === 0) {
@@ -3043,7 +3255,7 @@ Suggest a corrected input or a short alternative approach the user can try. Be c
         addMessage("system", "Load a model first, then try Today's news.", null, true);
         return;
       }
-      addMessage("system", "Fetching live headlines (BBC, Guardian, NPR, Google News)…", null, true);
+      addMessage("system", "Fetching live headlines (search APIs + BBC/Guardian/NPR/Reuters)…", null, true);
       try {
         const items = await fetchNews();
         const context = items.map((it, i) =>
@@ -3796,7 +4008,7 @@ Source: CoinGecko`;
         if (last) {
           // Never auto-load a 3B model on mobile — it often kills Safari
           if (/3B/i.test(last)) {
-            last = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+            last = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
           }
           const opt = [...modelSelect.options].find(o => o.value === last);
           if (opt) {
@@ -3807,7 +4019,7 @@ Source: CoinGecko`;
             return;
           }
         }
-        setStatus("", "Tap Load to start (Llama 3.2 1B default)");
+        setStatus("", "Tap Load to start (Qwen2.5 1.5B default)");
       } catch (e) {
         console.warn("Auto-load skipped", e);
         setStatus("", "Tap Load to start");
