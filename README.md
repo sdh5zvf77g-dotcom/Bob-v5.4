@@ -1,6 +1,6 @@
-# Crazy Bob v5.1 — 1B Learning Upgrade
+# Crazy Bob v5.3.3 — Crash-resistant local AI on iPhone
 
-Crazy Bob is a GitHub Pages-compatible, installable iPhone web app for local AI inference using WebLLM/WebGPU. This update preserves the existing dashboard and existing feature set while improving the reasoning instructions and adding an evidence-aware learning ledger.
+Crazy Bob is a GitHub Pages-compatible, installable iPhone web app for local AI inference using WebLLM/WebGPU. v5.3.3 focuses on stopping Safari crash loops when restoring models, while keeping the learning ledger, free search sources, and full feature set from earlier versions.
 
 ## Preserved
 
@@ -31,10 +31,11 @@ Crazy Bob is a GitHub Pages-compatible, installable iPhone web app for local AI 
 - Simple questions can still be answered directly; difficult tasks are prompted to use a more structured approach.
 - Adds an empty-response fallback so a blank model result is not silently saved as a normal answer.
 
-### Default model
-- Llama 3.2 1B q4f16 is the default selection.
-- If a remembered 3B model is detected on startup, automatic restore falls back to the 1B model to reduce iPhone crash risk.
-- Users can still manually choose another listed model.
+### Default model & crash resistance (v5.3.3)
+- Llama 3.2 1B q4f16 is the default selection (more stable than 1.5B on many iPhones).
+- Auto-restore only loads ≤1B models after a refresh. If the last model was 1.5B or 3B, the selector remembers it but you must tap **Load** yourself (this stops endless crash loops).
+- On out-of-memory failures the app switches the selector to SmolLM2 360M.
+- Users can still manually choose any listed model, including the heavier ones.
 
 ## Important technical boundary
 

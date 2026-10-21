@@ -378,9 +378,9 @@
     <select id="modelSelect">
       <option value="SmolLM2-360M-Instruct-q4f16_1-MLC">SmolLM2 360M (safest / fastest)</option>
       <option value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC">Qwen2.5 0.5B (light)</option>
-      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Llama 3.2 1B (balanced)</option>
+      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC" selected>Llama 3.2 1B (balanced / recommended)</option>
       <option value="Llama-3.2-1B-Instruct-q4f32_1-MLC">Llama 3.2 1B q4f32 (no f16 needed)</option>
-      <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC" selected>Qwen2.5 1.5B (default)</option>
+      <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Qwen2.5 1.5B (heavier — can crash on some iPhones)</option>
       <option value="Llama-3.2-3B-Instruct-q4f16_1-MLC">Llama 3.2 3B (heavy — may crash on iPhone)</option>
     </select>
     <button id="loadBtn">Load</button>
@@ -2301,13 +2301,14 @@ Your job is to improve the result:
             if (typeof engine.unload === "function") await engine.unload();
           } catch (_) {}
           engine = null;
-          // Give Safari a moment to release GPU memory
-          await new Promise(r => setTimeout(r, 400));
+          // Give Safari more time to release GPU / process memory (critical on iOS)
+          await new Promise(r => setTimeout(r, 800));
         }
 
-        // Warn on heavy models
-        if (/3B/i.test(selected)) {
-          progressText.textContent = "Large model — may fail on phones with low RAM…";
+        // Warn on heavy models and give an extra pause so the user can still cancel
+        if (/1\.5B|3B/i.test(selected)) {
+          progressText.textContent = "Heavier model — close other Safari tabs first. May crash if RAM is tight…";
+          await new Promise(r => setTimeout(r, 300));
         }
 
         engine = await CreateMLCEngine(selected, {
@@ -2363,14 +2364,17 @@ Your job is to improve the result:
         engine = null;
         const msg = err?.message || String(err);
         let hint = msg;
+        let switchToSafer = false;
         if (/WebGPU|gpu/i.test(msg)) {
-          hint = "WebGPU missing. Use a recent Safari/Chrome on iPhone.";
-        } else if (/memory|OOM|out of memory|Failed to allocate/i.test(msg)) {
-          hint = "Out of memory. Try SmolLM2 360M or Qwen 0.5B, close other tabs, and reload.";
+          hint = "WebGPU missing. Use a recent Safari/Chrome on iPhone (iOS 18+).";
+        } else if (/memory|OOM|out of memory|Failed to allocate|abort|killed/i.test(msg)) {
+          hint = "Out of memory / Safari killed the tab. Close other tabs & apps, then try SmolLM2 360M or Llama 1B.";
+          switchToSafer = true;
         } else if (/fetch|network|Failed to fetch|Load failed/i.test(msg)) {
           hint = "Network/download failed. Check connection and try again (model is cached after first success).";
         } else if (/shader-f16|f16/i.test(msg)) {
           hint = "This device may lack float16 shaders. Try the 'Llama 3.2 1B q4f32' option.";
+          try { modelSelect.value = "Llama-3.2-1B-Instruct-q4f32_1-MLC"; } catch (_) {}
         }
         setStatus("error", "Failed to load");
         progressText.textContent = hint;
@@ -2378,7 +2382,14 @@ Your job is to improve the result:
         loadBtn.classList.remove("loading");
         loadBtn.disabled = false;
         modelSelect.disabled = false;
-        addMessage("system", "Model load failed: " + hint + "\n\nTip: start with SmolLM2 360M (safest).", null, true);
+        if (switchToSafer) {
+          // Pre-select the safest model so the next tap is low-risk
+          try {
+            modelSelect.value = "SmolLM2-360M-Instruct-q4f16_1-MLC";
+            await setLastModel("SmolLM2-360M-Instruct-q4f16_1-MLC");
+          } catch (_) {}
+        }
+        addMessage("system", "Model load failed: " + hint + "\n\nTip: start with SmolLM2 360M (safest) or Llama 3.2 1B.", null, true);
       }
     }
 
@@ -3996,7 +4007,8 @@ Source: CoinGecko`;
     setStatus("", "Model not loaded");
 
     // Restore voice settings + auto-load last model from browser cache.
-    // Safe models auto-load; heavy 3B is downgraded to SmolLM2 to avoid crash loops.
+    // Very conservative on mobile: only auto-load ≤1B models to avoid Safari crash loops.
+    // 1.5B and 3B require a manual Load tap so the user can prepare (close tabs, free RAM).
     (async () => {
       try {
         await loadVoiceSettings();
@@ -4006,20 +4018,26 @@ Source: CoinGecko`;
       try {
         let last = await getLastModel();
         if (last) {
-          // Never auto-load a 3B model on mobile — it often kills Safari
-          if (/3B/i.test(last)) {
-            last = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+          // Crash-loop prevention: never auto-load models that commonly kill Safari tabs
+          const isHeavy = /1\.5B|3B/i.test(last);
+          if (isHeavy) {
+            // Remember the preferred heavy model in the selector, but do not auto-load it
+            const opt = [...modelSelect.options].find(o => o.value === last);
+            if (opt) modelSelect.value = last;
+            setStatus("", "Last model was heavy — tap Load when ready (or pick a smaller one)");
+            return;
           }
+          // Safe models (360M / 0.5B / 1B) can auto-restore
           const opt = [...modelSelect.options].find(o => o.value === last);
           if (opt) {
             modelSelect.value = last;
             setStatus("loading", "Restoring model from cache…");
             // Slight delay so the UI can paint first
-            setTimeout(() => loadModel(true), 500);
+            setTimeout(() => loadModel(true), 600);
             return;
           }
         }
-        setStatus("", "Tap Load to start (Qwen2.5 1.5B default)");
+        setStatus("", "Tap Load to start (Llama 3.2 1B recommended)");
       } catch (e) {
         console.warn("Auto-load skipped", e);
         setStatus("", "Tap Load to start");
